@@ -1,69 +1,168 @@
-/* eslint-disable no-undef */
-const request = require("supertest");
-const app = require("../app");
+const ApplicationController = require("./ApplicationController");
+const { EmailNotRegisteredError, InsufficientAccessError, RecordNotFoundError, WrongPasswordError, EmailAlreadyTakenError } = require("../errors");
+const { JWT_SIGNATURE_KEY } = require("../../config/application");
 
-describe("GET /v1/cars", () => {
-  const car = {
-    name: "Avanza Test",
-    price: 300000,
-    size: "SMALL",
-    image: "https://source.unsplash.com/505x505",
-  };
 
-  //Login using the registered admin account
-  const admin = {
-    email: "klee@gmail.com",
-    password: "123456"
-  };
-
-  const customer = {
-    email: "Fikri@binar.co.id",
-    password: "123456"
+class AuthenticationController extends ApplicationController {
+  constructor({
+    userModel,
+    roleModel,
+    bcrypt,
+    jwt,
+  }) {
+    super();
+    this.userModel = userModel;
+    this.roleModel = roleModel;
+    this.bcrypt = bcrypt;
+    this.jwt = jwt;
   }
-  
-  it("user is admin and successfully create car with response 201 as status code", async () => {
-    return request(app)
-      .post("/v1/auth/login")
-      .set("Content-Type", "application/json")
-      .send({ email: admin.email, password: admin.password })
-      .then((res) => {
-        request(app)
-          .post("/v1/cars")
-          .set("authorization", "Bearer " + res.body.accessToken)
-          .send(car)
-          .then((res) => {
-            expect(res.statusCode).toBe(201);
-            expect(res.body.name).toEqual(car.name);
-            expect(res.body.price).toEqual(car.price);
-            expect(res.body.size).toEqual(car.size);
-            expect(res.body.image).toEqual(car.image);
-          });
-      });
-  });
 
-  it("user failed to create car(Not Admin) with response 401 as status code", async () => {
-    return request(app)
-      .post("/v1/auth/login")
-      .set("Content-Type", "application/json")
-      .send({ email: customer.email, password: customer.password })
-      .then((res) => {
-        request(app)
-          .post("/v1/cars")
-          .set("authorization", "Bearer " + res.body.accessToken)
-          .send(car)
-          .then((resp) => {
-            expect(resp.statusCode).toBe(401);
-            expect(resp.body).toEqual({
-              error: {
-                name: "Error",
-                message: "Access forbidden!",
-                details: {
-                  role: "CUSTOMER",
-                  reason: "CUSTOMER is not allowed to perform this operation.",
-                },
-              },
-            });
-          });
+  accessControl = {
+    PUBLIC: "PUBLIC",
+    ADMIN: "ADMIN",
+    CUSTOMER: "CUSTOMER",
+  }
+
+  authorize =(rolename) => {
+    return (req, res, next) => {
+      try {
+        const token = req.headers.authorization?.split("Bearer ")[1];
+        const payload = this.decodeToken(token)
+
+        if (!!rolename && rolename != payload.role.name)
+          throw new InsufficientAccessError(payload?.role?.name);
+
+        req.user = payload;
+        next();
+      }
+
+      catch(err) {
+        res.status(401).json({
+          error: {
+            name: err.name,
+            message: err.message,
+            details: err.details || null,
+          }
+        })
+      }
+    }
+  }
+
+  handleLogin = async (req, res, next) => {
+    try {
+      const email = req.body.email.toLowerCase();
+      const password = req.body.password;
+      const user = await this.userModel.findOne({
+        where: { email, },
+        include: [{ model: this.roleModel, attributes: [ "id", "name", ], }]
       });
-  });
-});
+
+      if (!user) {
+        const err = new EmailNotRegisteredError(email);
+        res.status(404).json(err);
+        return;
+      }
+
+      const isPasswordCorrect = this.verifyPassword(password, user.encryptedPassword);
+
+      if (!isPasswordCorrect) {
+        const err = new WrongPasswordError();
+        res.status(401).json(err);
+        return;
+      }
+
+      const accessToken = this.createTokenFromUser(user, user.Role);
+
+      res.status(201).json({
+        accessToken,
+      })
+    }
+
+    catch(err) {
+      next(err);
+    }
+  }
+
+  handleRegister = async (req, res, next) => {
+    try {
+      const name = req.body.name;
+      const email = req.body.email.toLowerCase();
+      const password = req.body.password;
+      let existingUser = await this.userModel.findOne({ where: { email, }, });
+
+      if (existingUser) {
+        const err = new EmailAlreadyTakenError(email);
+        res.status(422).json(err);
+        return;
+      }
+
+      const role = await this.roleModel.findOne({
+        where: { name: this.accessControl.CUSTOMER }
+      });
+
+      const user = await this.userModel.create({
+        name,
+        email,
+        encryptedPassword: this.encryptPassword(password),
+        roleId: role.id,
+      }) 
+
+      const accessToken = this.createTokenFromUser(user, role);
+
+      res.status(201).json({
+        accessToken,
+      })
+    }
+
+    catch(err) {
+      next(err);
+    }
+  }
+
+  handleGetUser = async (req, res) => {
+    const user = await this.userModel.findByPk(req.user.id);
+
+    if (!user) {
+      const err = new RecordNotFoundError(this.userModel.name);
+      res.status(404).json(err)
+      return;
+    }
+
+    const role = await this.roleModel.findByPk(user.roleId); 
+
+    if (!role) {
+      const err = new RecordNotFoundError(this.roleModel.name);
+      res.status(404).json(err)
+      return;
+    }
+
+    res.status(200).json(user);
+  }
+
+  createTokenFromUser = (user, role) => {
+    return this.jwt.sign({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      image: user.image,
+      role: {
+        id: role.id,
+        name: role.name,
+      }
+    }, JWT_SIGNATURE_KEY);
+  }
+
+  decodeToken(token) {
+    return this.jwt.verify(token, JWT_SIGNATURE_KEY);
+  }
+
+  encryptPassword = (password) => {
+    return this.bcrypt.hashSync(password, 10);
+  }
+
+  verifyPassword = (password, encryptedPassword) => {
+    return this.bcrypt.compareSync(password, encryptedPassword)
+  }
+}
+
+module.exports = AuthenticationController;
