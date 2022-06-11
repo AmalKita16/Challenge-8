@@ -1,9 +1,5 @@
-# BCR API
+# CHALLENGE 8 - MUHAMMAD BINTANG PRAMADIPTA
 
-Di dalam repository ini terdapat implementasi API dari Binar Car Rental.
-Tugas kalian disini adalah:
-1. Fork repository
-2. Tulis unit test di dalam repository ini menggunakan `jest`.
-3. Coverage minimal 70%
+![image](https://user-images.githubusercontent.com/79188413/173172055-06382e4c-3dd1-4728-82a3-211eed4fb3b9.png)
 
-Good luck!
+Link heroku: https://challenge-8-m-bintang-p.herokuapp.com/
